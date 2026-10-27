@@ -268,6 +268,11 @@ const WORLDS = [
     decor:['🌳','🌾','🌲','🌻'] },
 ];
 let currentWorld = WORLDS[0], lastWorldIdx = -1;
+/* El mundo cambia tras una racha de aciertos seguidos (un error la reinicia).
+   Si la racha tarda demasiado, cambia igual tras MAX_STAGES_PER_WORLD etapas. */
+const STREAK_FOR_NEW_WORLD = 4;
+const MAX_STAGES_PER_WORLD = 10;
+let worldStreak = 0, stagesInWorld = 0;
 function pickWorld() {
   let i;
   do { i = Math.floor(Math.random() * WORLDS.length); } while (i === lastWorldIdx && WORLDS.length > 1);
@@ -738,7 +743,11 @@ function buildStage() {
   state.question = q;
   
   const prevWorld = currentWorld;
-  const world = pickWorld();
+  if (lastWorldIdx === -1 || worldStreak >= STREAK_FOR_NEW_WORLD || stagesInWorld >= MAX_STAGES_PER_WORLD) {
+    pickWorld(); worldStreak = 0; stagesInWorld = 0;
+  }
+  stagesInWorld++;
+  const world = currentWorld;
   const wantAnswers = 3 + (Math.random() < 0.5 ? 1 : 0);
   const opts = makeOptions(q, wantAnswers);
   const numAnswers = opts.length;
@@ -844,6 +853,7 @@ function confirmAnswer(pl) {
     state.mode = 'correct';
     state.solved++;
     state.currentErrors = 0;
+    worldStreak++;
     showMsg('✅ ¡Correcto!', '#2fbf5f', 70);
     AudioMod.correct();
     saveProgress();
@@ -852,6 +862,7 @@ function confirmAnswer(pl) {
   } else {
     pl.state = 'wrong';
     state.mode = 'wrong';
+    worldStreak = 0;
     state.shake = 14;
     state.currentErrors++;
     AudioMod.wrong();
