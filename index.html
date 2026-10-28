@@ -168,7 +168,7 @@
    ========================================================= */
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const BASE_VIEW_H = 560, MIN_VIEW_W = 400, MAX_VIEW_W = 1400;
-const LEVEL_W = 2200, LEVEL_H = 560, GROUND_Y = 480;
+const LEVEL_W = 18000, LEVEL_H = 560, GROUND_Y = 480;
 
 const GRAVITY   = 0.85;
 const JUMP_V    = -16;
@@ -177,6 +177,7 @@ const ACCEL     = 0.55;
 const FRICTION  = 0.82;
 
 const PW = 40, PH = 44;
+const MAX_AIR_JUMPS = 1;   // 1 = doble salto
 const STAGES_PER_LEVEL = 8;
 
 const SAVE_PROGRESS = 'mathRunner.v6.progress';
@@ -239,7 +240,7 @@ const WORLDS = [
   { id:'desierto', name:'Desierto', icon:'🏜️', accent:'#d9780f',
     sky:['#f28c28','#ffc46b','#fff0c2'], sun:{e:'☀️',x:-90,y:95,s:66},
     clouds:0.5, far:'🏜️', flyers:[[0.85,230,30,460,'🦅']],
-    ground:['🟧','🟫','🟫'], plat:'🟨', ans:['🟥','🟧'], decor:['🌵','🪨','🌵','🐍'],
+    ground:['🟧','🟫','🟫'], plat:'🟨', ans:['🟦','🟪'], decor:['🌵','🪨','🌵','🐍'],
     enemies:{alien:'🦂',turtle:'🐍',bee:'🦅'} },
   { id:'nieve', name:'Nieve', icon:'❄️', accent:'#3b82c4',
     sky:['#8fb8de','#cfe6f7','#f4fbff'], sun:{e:'🌤️',x:-70,y:85,s:50},
@@ -264,14 +265,15 @@ const WORLDS = [
   { id:'atardecer', name:'Atardecer', icon:'🌇', accent:'#d6336c',
     sky:['#5a3a8c','#ff7e5f','#ffd8a8'], sun:{e:'🌅',x:-100,y:150,s:60},
     clouds:true, far:'⛰️', flyers:[[0.60,210,24,320,'🕊️'],[0.85,250,30,420,'🦅']],
-    ground:['🟩','🟫','🟫'], plat:'🧱', ans:['🟧','🟨'], tint:'rgba(120,40,70,.18)',
+    ground:['🟩','🟫','🟫'], plat:'🧱', ans:['🟦','🟪'], tint:'rgba(120,40,70,.18)',
     decor:['🌳','🌾','🌲','🌻'] },
 ];
 let currentWorld = WORLDS[0], lastWorldIdx = -1;
 /* El mundo cambia tras una racha de aciertos seguidos (un error la reinicia).
    Si la racha tarda demasiado, cambia igual tras MAX_STAGES_PER_WORLD etapas. */
 const STREAK_FOR_NEW_WORLD = 4;
-const MAX_STAGES_PER_WORLD = 10;
+const MAX_STAGES_PER_WORLD = 8;
+let needWorld = true;   // true => el próximo buildStage crea un mundo nuevo
 let worldStreak = 0, stagesInWorld = 0;
 function pickWorld() {
   let i;
@@ -316,6 +318,9 @@ const AudioMod = (() => {
     wrong()   { play(200,0.15,'sawtooth',0.3,120); setTimeout(()=>play(140,0.2,'sawtooth',0.25,90),100); },
     lifeLost(){ [400,320,240,160].forEach((f,i)=>setTimeout(()=>play(f,0.18,'square',0.3),i*120)); },
     gameOver(){ [400,340,280,220,160].forEach((f,i)=>setTimeout(()=>play(f,0.3,'sawtooth',0.3),i*220)); },
+    bell()    { play(880, 1.1, 'sine', 0.35); play(2434, 0.7, 'sine', 0.16); play(4752, 0.4, 'sine', 0.08);
+                setTimeout(() => { play(1320, 0.9, 'sine', 0.28); play(3650, 0.5, 'sine', 0.1); }, 140); },
+    jump2()   { play(520, 0.12, 'square', 0.3, 1100); },
     stomp()   { play(180, 0.08, 'square', 0.35, 320); setTimeout(()=>play(660, 0.1, 'triangle', 0.25), 60); },
     smash()   { play(90, 0.15, 'sawtooth', 0.4, 60); setTimeout(()=>play(500, 0.08, 'triangle', 0.3), 40); setTimeout(()=>play(900, 0.08, 'triangle', 0.25), 90); },
   };
@@ -737,107 +742,168 @@ function getEnemySpawnParams() {
 /* =========================================================
    7. STAGE BUILDER
    ========================================================= */
+/* ---------- Escenas para las respuestas ----------
+   Coordenadas locales: u = distancia desde el borde de entrada, en el sentido
+   de la marcha. Cada generador devuelve { ans, plats, width }. */
+const SCENE_TYPES = [
+  ['stairs', 3], ['tower', 2], ['pit', 3], ['tunnel', 2], ['cloud', 3], ['bridge', 2], ['low', 1],
+];
+let lastSceneTypes = [];
+const G = GROUND_Y;
+
+function genScene(type, C, dir) {
+  const R = (u, y, w, h = 18, extra = {}) =>
+    Object.assign({ x: dir > 0 ? C + u : C - u - w, y, w, h }, extra);
+  const bricks = (u, w, topY, rows) => {           // columna de ladrillos sólidos
+    const out = [];
+    for (let r = 0; r < rows; r++) out.push(R(u, topY + r * 32, w, 32));
+    return out;
+  };
+  const plats = []; let ans, width;
+  const mv = (o, p0 = 0.22) => { if (Math.random() < p0) { o.moves = true; o.amp = 30 + Math.random() * 25;
+    o.phase = Math.random() * 6.28; o.omega = 1 + Math.random() * 0.8; o.dx = 0; } return o; };
+
+  if (type === 'stairs' || type === 'tunnel') {
+    const K = rnd(2, 4), ys = [];                    // saltos de 60–76 px: cómodos de subir
+    let yy = G;
+    for (let j = 0; j < K; j++) { yy -= rnd(60, 76); ys.push(yy); }
+    const ay = yy - rnd(60, 76), ua = 60 + 70 * (K - 1);
+    for (let j = 1; j <= K; j++) plats.push(R(ua - 60 - 70 * (j - 1), ys[K - j], 100));
+    ans = R(ua, ay, 110); width = ua + 110;
+    if (type === 'tunnel') {                         // ladrillo arriba y abajo: la respuesta "ensanduchada"
+      plats.push(...bricks(ua + 45, 90, ay - 84, 1), ...bricks(ua + 45, 90, ay + 30, 1));
+      width = ua + 135;
+    } else mv(ans);
+  } else if (type === 'tower') {
+    const K = rnd(2, 4), ay = G - 40 - 80 * K;
+    for (let j = 0; j < K; j++) plats.push(R((j % 2) * 110, G - 40 - 80 * j, 90));
+    ans = R((K % 2) * 110 - 10, ay, 110); width = 250; mv(ans, 0.15);
+  } else if (type === 'pit') {                       // foso entre dos torres de ladrillo
+    const Ht = rnd(3, 5), top = G - 32 * Ht;
+    if (Ht >= 4) plats.push(R(0, G - 16 * Ht, 90));
+    plats.push(...bricks(110, 64, top, Ht), ...bricks(294, 64, top, Ht));
+    ans = R(174, top + 64, 110); width = 358;
+    for (let fy = ans.y + 22; fy < G - 8; fy += 32) plats.push(R(174, fy, 120, 32));
+  } else if (type === 'cloud') {                     // nubes flotantes
+    const ay = rnd(130, 240), J = Math.max(2, Math.ceil((G - 70 - ay) / 72));
+    let u = 0, y = G - 70;
+    for (let j = 0; j < J; j++) {
+      plats.push(mv(R(u, y, 80, 18, { cloud: true, deco: true }), 0.35));
+      u += rnd(85, 120); y -= Math.round((G - 70 - ay) / J);
+    }
+    ans = R(u, ay, 110); width = u + 110; mv(ans, 0.3);
+  } else if (type === 'bridge') {
+    const yb = G - rnd(110, 130), nb = rnd(3, 5);
+    plats.push(R(0, G - 64, 90));
+    let u = 120;
+    for (let i = 0; i < nb; i++) { plats.push(R(u, yb, 100, 24)); u += 100 + rnd(30, 70); }
+    ans = R(u, yb, 110); width = u + 110;
+  } else {                                           // low: salto sencillo
+    ans = R(rnd(0, 40), G - rnd(60, 110), 110); width = 150; mv(ans, 0.4);
+  }
+  if (ans.moves === undefined) ans.moves = false;
+  plats.forEach(pl => { pl.origX = pl.x; if (!pl.moves) pl.moves = false; });
+  ans.origX = ans.x;
+  return { ans, plats, width };
+}
+
+function pickSceneTypes(n) {
+  const pool = SCENE_TYPES.filter(([t]) => !lastSceneTypes.slice(-3).includes(t));
+  const out = [];
+  while (out.length < n) {
+    const cand = pool.filter(([t]) => !out.includes(t));
+    const list = cand.length ? cand : SCENE_TYPES;
+    let r = Math.random() * list.reduce((a, [, w]) => a + w, 0), pick = list[0][0];
+    for (const [t, w] of list) { if ((r -= w) <= 0) { pick = t; break; } }
+    out.push(pick);
+  }
+  lastSceneTypes = lastSceneTypes.concat(out).slice(-6);
+  return out;
+}
+
+function buildWorld() {
+  const world = pickWorld();
+  worldStreak = 0; stagesInWorld = 0; needWorld = false;
+  state.platforms = []; state.answers = []; state.coinsList = []; state.enemies = [];
+  const p = state.player;
+  p.x = 80; p.y = GROUND_Y - PH; p.vx = 0; p.vy = 0; p.onGround = true; p.facing = 1;
+  state.camera.x = 0; state.camera.y = 0;
+  return world;
+}
+
 function buildStage() {
   const q = genQuestionForLevel(state.level, state.stage);
-  if (!q) return; // Seguridad
+  if (!q) return;
   state.question = q;
-  
+
   const prevWorld = currentWorld;
-  if (lastWorldIdx === -1 || worldStreak >= STREAK_FOR_NEW_WORLD || stagesInWorld >= MAX_STAGES_PER_WORLD) {
-    pickWorld(); worldStreak = 0; stagesInWorld = 0;
-  }
+  if (needWorld || worldStreak >= STREAK_FOR_NEW_WORLD || stagesInWorld >= MAX_STAGES_PER_WORLD) buildWorld();
   stagesInWorld++;
   const world = currentWorld;
-  const wantAnswers = 3 + (Math.random() < 0.5 ? 1 : 0);
-  const opts = makeOptions(q, wantAnswers);
-  const numAnswers = opts.length;
+  const p = state.player;
 
-  /* La correcta casi nunca queda en la plataforma más cercana al jugador
-     (la 0, la primera que se alcanza). Probabilidad: FIRST_SLOT_P. */
-  const FIRST_SLOT_P = 0.10;
-  const correctSlot = Math.random() < FIRST_SLOT_P ? 0 : rnd(1, numAnswers - 1);
+  const opts = makeOptions(q, 3 + (Math.random() < 0.5 ? 1 : 0));
+  const n = opts.length;
+
+  /* La correcta rara vez es la más cercana al jugador (slot 0). */
+  const correctSlot = Math.random() < 0.15 ? 0 : rnd(1, n - 1);
   const wrongOpts = shuffle(opts.filter(v => String(v) !== String(q.answer)));
   let wi = 0;
   const slotVals = [];
-  for (let s = 0; s < numAnswers; s++) slotVals.push(s === correctSlot ? q.answer : wrongOpts[wi++]);
+  for (let s = 0; s < n; s++) slotVals.push(s === correctSlot ? q.answer : wrongOpts[wi++]);
 
-  state.answers = [];
-  state.platforms = [];
-  state.enemies = [];
+  /* La nueva pregunta nace donde está el jugador, hacia donde haya mundo */
+  const room = 3300;
+  let dir = Math.random() < 0.65 ? 1 : -1;
+  if (p.x + room > LEVEL_W) dir = -1;
+  if (p.x - room < 0) dir = 1;
 
-  const spawnParams = getEnemySpawnParams();
-  state.spawnTimer = spawnParams.initialDelay;
-
-  const sectionW = LEVEL_W / numAnswers;
-  const heights = [200, 260, 320, 380];
-
-  // Mezclar posiciones X para que no estén siempre en orden
-  const availableX = [];
-  for (let i = 0; i < numAnswers; i++) {
-    availableX.push(Math.round(i * sectionW + sectionW/2 - 55 + rnd(-30, 30)));
+  const types = pickSceneTypes(n);
+  let cursor = p.x + PW / 2 + dir * rnd(320, 560);
+  const scenes = [];
+  for (let i = 0; i < n; i++) {
+    const sc = genScene(types[i], cursor, dir);
+    scenes.push(sc);
+    cursor += dir * (sc.width + rnd(80, 200));
   }
-  const shuffledX = availableX;   // slot 0 = más cerca del jugador, el orden ya no se baraja
+  const xs = [];
+  scenes.forEach(sc => { sc.plats.concat(sc.ans).forEach(o => xs.push(o.x, o.x + o.w)); });
+  const rmin = Math.min(...xs) - 60, rmax = Math.max(...xs) + 60;
+  state.region = { min: rmin, max: rmax };
 
-  for (let i = 0; i < numAnswers; i++) {
-    const ansY = heights[rnd(0, heights.length - 1)];
-    const ansX = shuffledX[i];
-    const ansW = 110;
+  /* Limpieza: se conserva lo viejo que no estorba; la plataforma correcta ya usada queda como bloque */
+  const keep = o => o.x + o.w < rmin || o.x > rmax;
+  const near = o => o.x > p.x - 2500 && o.x < p.x + 3500;
+  const oldRight = state.answers.filter(a => a.state === 'right' && a.value !== undefined)
+    .map(a => ({ x: a.x, y: a.y, w: a.w, h: 18, origX: a.x, moves: false }));
+  state.platforms = state.platforms.concat(oldRight).filter(o => keep(o) && near(o));
+  state.answers = state.answers.filter(a => a.deco && keep(a) && near(a));
+  state.coinsList = state.coinsList.filter(c => !c.taken && c.x > p.x - 2500 && c.x < p.x + 3500 && (c.x < rmin || c.x > rmax));
 
-    state.answers.push({
-      x: ansX, y: ansY, w: ansW, h: 22,
-      value: slotVals[i], state: 'idle',
-      bonusAwarded: false,
-    });
+  scenes.forEach((sc, i) => {
+    sc.plats.forEach(o => (o.deco ? state.answers : state.platforms).push(o));
+    Object.assign(sc.ans, { value: slotVals[i], state: 'idle', bonusAwarded: false });
+    state.answers.push(sc.ans);
+  });
 
-    let curY = ansY + 80;
-    let curX = ansX - 60;
-    
-    while (curY <= GROUND_Y - 40) {
-      if (curX < 30) curX = 30;
-      
-      state.platforms.push({
-        x: curX, y: curY, w: 100, h: 18,
-        origX: curX,
-        moves: Math.random() < 0.15,
-        amp: 15 + Math.random() * 10,
-        phase: Math.random() * Math.PI * 2,
-        omega: 1.2 + Math.random() * 0.8,
-        dx: 0,
-      });
-      
-      curY += 80;
-      curX -= 70;
-    }
-  }
-
-  /* Monedas */
-  state.coinsList = [];
+  /* Monedas en la zona nueva */
   const allPlats = state.platforms.concat(state.answers);
-  let attempts = 0;
-  while (state.coinsList.length < 8 && attempts++ < 200) {
-    const cx = rnd(100, LEVEL_W - 100);
-    const cy = rnd(280, 460);
-    let ok = true;
-    for (const pl of allPlats) {
-      if (cx > pl.x - 15 && cx < pl.x + pl.w + 15 &&
-          cy > pl.y - 15 && cy < pl.y + pl.h + 15) { ok = false; break; }
-    }
-    if (!ok) continue;
-    state.coinsList.push({ x: cx, y: cy, taken: false });
+  let attempts = 0, added = 0;
+  while (added < 10 && attempts++ < 300) {
+    const cx = rnd(Math.max(100, rmin), Math.min(LEVEL_W - 100, rmax)), cy = rnd(150, 460);
+    if (allPlats.some(pl => cx > pl.x - 15 && cx < pl.x + pl.w + 15 && cy > pl.y - 15 && cy < pl.y + pl.h + 15)) continue;
+    state.coinsList.push({ x: cx, y: cy, taken: false }); added++;
   }
 
-  const p = state.player;
-  p.x = 80; p.y = GROUND_Y - PH;
-  p.vx = 0; p.vy = 0; p.onGround = true; p.facing = 1;
+  state.enemies = state.enemies.filter(e => Math.abs(e.x - p.x) < 700);
+  state.spawnTimer = getEnemySpawnParams().initialDelay;
   p.answerLock = 0; p.lastAnsweredPlat = null; p.invuln = 0;
-  p.standingPlatform = null;
-
   state.popups = [];
   state.mode = 'play';
-  state.camera.x = 0;
-  state.camera.y = 0;
   state.stageStartTime = performance.now();
   if (world !== prevWorld) showMsg(`${world.icon} ${world.name}`, world.accent, 55);
+  state.qFlash = 100;          // tarjeta de pregunta: color + zoom
+  AudioMod.bell();
 }
 
 /* =========================================================
@@ -884,11 +950,10 @@ function confirmAnswer(pl) {
     }
 
     const p = state.player;
-    // TELETRANSPORTE HACIA ABAJO PARA QUE NO SE QUEDE ATASCADO
-    p.y = pl.y + 35;       // Lo empujamos justo debajo de la plataforma
-    p.vy = 5;              // Lo obligamos a caer
-    p.vx = -8 * p.facing;  // Empujón hacia atrás
-    p.answerLock = 60;     // Bloqueo de 1 segundo
+    // La plataforma incorrecta se desactiva: el jugador cae a través y nunca queda atrapado ni la re-pisa
+    pl.disabled = true;
+    p.vy = 3;
+    p.answerLock = 25;
     p.invuln = 40;
     p.standingPlatform = null;
 
@@ -937,7 +1002,8 @@ const ENEMY_DEFS = {
 
 function spawnEnemy() {
   if (state.enemies.length >= 6) return;
-  const spawnX = state.camera.x + VIEW_W + 30;
+  const fromLeft = Math.random() < 0.35 && state.camera.x > 200;
+  const spawnX = fromLeft ? state.camera.x - 30 : state.camera.x + VIEW_W + 30;
   if (spawnX > LEVEL_W - 40) return;
 
   const r = Math.random();
@@ -951,7 +1017,7 @@ function spawnEnemy() {
 
   state.enemies.push({
     x: spawnX, y,
-    vx: -rnd(def.speed[0]*100, def.speed[1]*100) / 100,
+    vx: (fromLeft ? 1 : -1) * rnd(def.speed[0]*100, def.speed[1]*100) / 100,
     kind, def,
     t: Math.random() * 100,
     phase: Math.random() * Math.PI * 2,
@@ -992,7 +1058,7 @@ function updateEnemies(dt) {
         state.coins++;
         addPopup(e.x, e.y, '💥');
         AudioMod.stomp();
-        p.vy = -10;
+        p.vy = -10; p.airJumps = 0;
         p.y = e.y - e.size - 4;
         state.enemies.splice(i, 1);
         continue;
@@ -1012,7 +1078,7 @@ function updateEnemies(dt) {
       }
     }
 
-    if (e.x < state.camera.x - 100) state.enemies.splice(i, 1);
+    if (e.x < state.camera.x - 450 || e.x > state.camera.x + VIEW_W + 450) state.enemies.splice(i, 1);
   }
 }
 
@@ -1079,9 +1145,14 @@ function update(dt) {
   } else p.vx *= Math.pow(0.85, dt);
 
   /* Salto */
+  if (p.onGround) p.airJumps = 0;                      // al tocar suelo/plataforma se recarga el doble salto
   if (canInput && jumpBuffer > 0 && p.onGround) {
-    p.vy = JUMP_V; p.onGround = false; jumpBuffer = 0;
+    p.vy = JUMP_V; p.onGround = false; jumpBuffer = 0; p.airJumps = 0;
     AudioMod.init(); AudioMod.jump();
+  } else if (canInput && jumpBuffer > 0 && !p.onGround && (p.airJumps || 0) < MAX_AIR_JUMPS) {
+    p.vy = JUMP_V; jumpBuffer = 0; p.airJumps = (p.airJumps || 0) + 1;   // 2.º impulso en el aire
+    addPopup(p.x + PW/2, p.y + PH, '💨');
+    AudioMod.init(); AudioMod.jump2();
   }
   jumpBuffer = Math.max(0, jumpBuffer - dt);
 
@@ -1124,6 +1195,7 @@ function update(dt) {
 
   /* One-way (respuestas) */
   for (const pl of state.answers) {
+    if (pl.disabled) continue;
     if (p.x + PW > pl.x + 4 && p.x < pl.x + pl.w - 4 &&
         p.vy >= 0 &&
         prevBottom <= pl.y + 10 &&
@@ -1134,7 +1206,7 @@ function update(dt) {
 
   /* Bonus al pasar por debajo */
   for (const pl of state.answers) {
-    if (pl.bonusAwarded) continue;
+    if (pl.bonusAwarded || pl.deco || pl.disabled) continue;
     if (p.vy < -3 &&
         p.x + PW > pl.x + 12 && p.x < pl.x + pl.w - 12 &&
         prevY >= pl.y + pl.h - 2 &&
@@ -1167,6 +1239,21 @@ function update(dt) {
                     Math.abs((p.y + PH) - lp.y) < 4;
     if (!stillOn) p.lastAnsweredPlat = null;
   }
+
+  /* Red de seguridad anti-atasco */
+  const trying = keys.left || keys.right || jumpBuffer > 0;
+  if (state.mode === 'play' && trying) {
+    if (Math.abs(p.x - state.stuckX) < 45 && Math.abs(p.y - state.stuckY) < 45) state.stuckT = (state.stuckT || 0) + dt;
+    else { state.stuckT = 0; state.stuckX = p.x; state.stuckY = p.y; }
+    if (state.stuckT > 420) {
+      state.stuckT = 0;
+      const lx = Math.max(60, (state.region ? state.region.min : p.x) - 90);
+      const rx = Math.min(LEVEL_W - 100, (state.region ? state.region.max : p.x) + 90);
+      p.x = Math.abs(p.x - lx) < Math.abs(p.x - rx) ? lx : rx;
+      p.y = GROUND_Y - PH; p.vx = 0; p.vy = 0; p.invuln = 60;
+      showMsg('↩️ ¡Te rescatamos!', '#2b7de9', 60);
+    }
+  } else if (!trying) { state.stuckT = 0; state.stuckX = p.x; state.stuckY = p.y; }
 
   /* Monedas estáticas */
   for (const c of state.coinsList) {
@@ -1206,6 +1293,7 @@ function update(dt) {
   else state.camera.y = (LEVEL_H - VIEW_H) / 2;
 
   if (state.msgTimer > 0) state.msgTimer -= dt;
+  if (state.qFlash > 0) state.qFlash -= dt;
   if (state.shake > 0.3) state.shake *= Math.pow(0.88, dt);
   else state.shake = 0;
 }
@@ -1354,6 +1442,11 @@ function drawGround() {
 
 function drawPlatform(pl) {
   const bw = 32, n = Math.ceil(pl.w / bw), off = (pl.w - n*bw)/2;
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,14,40,.55)';
+  roundRect(ctx, pl.x, pl.y - 1, pl.w, Math.min(pl.h, 26) + 2, 5); ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.stroke();
+  ctx.restore();
   for (let i = 0; i < n; i++)
     drawEmoji(currentWorld.plat, pl.x + off + i*bw + bw/2, pl.y + 11, 32);
   if (currentWorld.tint) {
@@ -1457,9 +1550,21 @@ function render() {
   drawDecor(W);
   for (const pl of state.platforms) drawPlatform(pl);
   for (const a of state.answers) {
+    if (a.deco) {
+      ctx.save(); ctx.fillStyle = 'rgba(20,14,40,.35)';
+      roundRect(ctx, a.x + 2, a.y + 10, a.w - 4, 10, 5); ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.stroke(); ctx.restore();
+      for (let k = 0; k < 2; k++) drawEmoji('☁️', a.x + 20 + k * 40, a.y + 6, 44);
+      continue;
+    }
+    ctx.save(); ctx.fillStyle = 'rgba(20,14,40,.6)';
+    roundRect(ctx, a.x, a.y - 1, a.w, 24, 6); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.restore();
     const emoji = a.bonusAwarded ? W.ans[1] : W.ans[0];
+    if (a.disabled) ctx.globalAlpha = 0.3;
     drawEmoji(emoji, a.x + a.w/2, a.y + 11, 36);
     drawAnswerPlatform(a);
+    ctx.globalAlpha = 1;
   }
   for (const c of state.coinsList) if (!c.taken) drawEmoji(COIN_EMOJI, c.x, c.y, 26);
   for (const e of state.enemies) drawEnemy(e);
@@ -1493,12 +1598,19 @@ function render() {
     const tw = ctx.measureText(qText).width;
     const bw = tw + 40*uiScale, bh = fs + 30*uiScale;
     const bx = (cw-bw)/2, by = 12*uiScale;
+    const fl = Math.max(0, Math.min(1, (state.qFlash || 0) / 100)), prog = 1 - fl;
+    const zoom = fl > 0 ? 1 + 0.28 * Math.sin(prog * Math.PI * 2) * (1 - prog) : 1;
+    const mix = (a, b) => Math.round(a * fl + b * (1 - fl));
+    ctx.save();
+    ctx.translate(cw/2, by + bh/2); ctx.scale(zoom, zoom); ctx.translate(-cw/2, -(by + bh/2));
     roundRect(ctx, bx, by, bw, bh, 16*uiScale);
-    ctx.fillStyle = 'rgba(255,255,255,.96)'; ctx.fill();
-    ctx.lineWidth = 3; ctx.strokeStyle = '#2b7de9'; ctx.stroke();
+    ctx.fillStyle = fl > 0 ? `rgb(${mix(255,255)},${mix(213,250)},${mix(74,250)})` : 'rgba(255,255,255,.96)';
+    ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = fl > 0 ? `rgb(${mix(247,43)},${mix(140,125)},${mix(0,233)})` : '#2b7de9'; ctx.stroke();
     ctx.fillStyle = '#10203a';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(qText, cw/2, by + bh/2 + 2);
+    ctx.restore();
   }
 
   const hudY = 12*uiScale + 60*uiScale;
@@ -1709,6 +1821,7 @@ playBtn.onclick = () => {
   state.lives = state.livesMax;
   state.currentErrors = 0;
   state.tournamentStep = 0;
+  needWorld = true;
   menuEl.classList.add('hidden');
   touchEl.classList.add('visible');
   showPauseBtn();
@@ -1807,6 +1920,7 @@ document.getElementById('goRetry').onclick = () => {
   AudioMod.init(); AudioMod.startMusic();
   state.lives = state.livesMax; state.currentErrors = 0;
   state.stage = 1; state.tournamentStep = 0;
+  needWorld = true;
   gameoverEl.classList.add('hidden');
   touchEl.classList.add('visible');
   showPauseBtn();
