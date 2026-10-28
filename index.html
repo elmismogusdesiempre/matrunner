@@ -166,7 +166,8 @@
 /* =========================================================
    1. CONSTANTES
    ========================================================= */
-const DPR = Math.min(window.devicePixelRatio || 1, 2);
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+const spriteCache = new Map();   // emojis pre-renderizados: dibujar una imagen es mucho más barato que fillText
 const BASE_VIEW_H = 560, MIN_VIEW_W = 400, MAX_VIEW_W = 1400;
 const LEVEL_W = 18000, LEVEL_H = 560, GROUND_Y = 480;
 
@@ -203,6 +204,7 @@ let scale = 1, VIEW_W = 800, VIEW_H = 560;
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
+  spriteCache.clear();
   canvas.width  = Math.floor(w * DPR);
   canvas.height = Math.floor(h * DPR);
   canvas.style.width  = w + 'px';
@@ -1303,14 +1305,31 @@ function update(dt) {
    ========================================================= */
 function roundRect(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);
   c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath();}
-function drawEmoji(ch,x,y,size){ctx.font=`${size}px ${EMOJI_FONT}`;ctx.textAlign='center';
-  ctx.textBaseline='middle';ctx.fillText(ch,x,y);}
+function getSprite(ch, size) {
+  size = Math.round(size);
+  const k = DPR * scale, key = ch + '|' + size + '|' + k.toFixed(2);
+  let c = spriteCache.get(key);
+  if (!c) {
+    const side = Math.max(4, Math.ceil(size * 1.5 * k));
+    c = document.createElement('canvas'); c.width = c.height = side;
+    const g = c.getContext('2d');
+    g.font = `${size * k}px ${EMOJI_FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(ch, side / 2, side / 2);
+    c._s = side / k;
+    if (spriteCache.size > 700) spriteCache.clear();
+    spriteCache.set(key, c);
+  }
+  return c;
+}
+function drawEmoji(ch, x, y, size) {
+  const c = getSprite(ch, size);
+  ctx.drawImage(c, x - c._s / 2, y - c._s / 2, c._s, c._s);
+}
 function drawEmojiFlipped(ch, x, y, size, flip=1, rot=0) {
   ctx.save(); ctx.translate(x, y); ctx.scale(flip, 1);
   if (rot) ctx.rotate(rot);
-  ctx.font = `${size}px ${EMOJI_FONT}`;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(ch, 0, 0); ctx.restore();
+  const c = getSprite(ch, size);
+  ctx.drawImage(c, -c._s / 2, -c._s / 2, c._s, c._s); ctx.restore();
 }
 
 function drawSky() {
@@ -1662,18 +1681,32 @@ function render() {
 /* =========================================================
    12. LOOP
    ========================================================= */
-let lastT = 0;
+let lastT = 0, targetMs = 1000 / 60, slowAcc = 0, slowN = 0, liteMode = false;
 function loop(t) {
+  requestAnimationFrame(loop);
   if (!lastT) lastT = t;
-  let dt = (t - lastT) / 16.667;
+  const elapsed = t - lastT;
+  if (elapsed < targetMs - 4) return;          // limita a ~60 fps (en pantallas de 120/144 Hz se ahorra la mitad del trabajo)
   lastT = t;
+
+  /* Modo ligero automático: si el equipo no sostiene ~40 fps, pasa a 30 fps estables y resolución 1x */
+  if (!liteMode && elapsed < 250) {
+    slowAcc += elapsed; slowN++;
+    if (slowN >= 120) {
+      if (slowAcc / slowN > 26) { liteMode = true; targetMs = 1000 / 30; DPR = 1; resize(); }
+      slowAcc = 0; slowN = 0;
+    }
+  }
+
+  let dt = elapsed / 16.667;
   if (dt > 3) dt = 3;
   if (dt < 0) dt = 0;
-  
+
   // Separar el try-catch para que un error de update no rompa el render
   try {
     if (state.mode === 'play' || state.mode === 'correct' || state.mode === 'wrong') {
-      update(dt);
+      const steps = Math.max(1, Math.ceil(dt / 1.2));     // física en pasos pequeños: estable aunque bajen los fps
+      for (let i = 0; i < steps; i++) update(dt / steps);
     }
   } catch(e) {
     console.error("Update error:", e);
@@ -1684,8 +1717,6 @@ function loop(t) {
   } catch(e) {
     console.error("Render error:", e);
   }
-  
-  requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
